@@ -1,0 +1,9 @@
+# Pin the NVIDIA dGPU awake while an external display (wired to it) is connected.
+# Fires on monitor connect/disconnect hotplug events from any DRM device.
+# Installed by gpu-power-control to /etc/udev/rules.d.
+#
+# Launched via `systemd-run --no-block` (not a bare RUN+=) because the helper
+# debounces disconnects with a short sleep; a long-running RUN+= would block udev
+# event processing and gets killed by the udev timeout. --collect reaps the
+# transient unit when it exits.
+ACTION=="change", SUBSYSTEM=="drm", ENV{HOTPLUG}=="1", RUN+="/usr/bin/systemd-run --no-block --collect --unit=nvidia-extdisp-power-$env{SEQNUM} /usr/local/bin/nvidia-external-display-power.sh"
