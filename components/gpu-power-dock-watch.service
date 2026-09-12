@@ -1,0 +1,6 @@
+[Unit]
+Description=Warn when a docked Plasma session is still rendering on AMD
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/share/gpu-power-control/gpu-power-warning.sh dock

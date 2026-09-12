@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 #
-# gpu-power-control -- manage the NVIDIA dGPU "docked profile" for KWin Wayland.
+# gpu-power-control -- manage the primary GPU used by KWin Wayland.
 #
 # Two mechanisms (see README.md):
-#   1. Login profile  -> KWin renders on the NVIDIA dGPU when an external screen
-#      (wired to it) is connected at login; AMD iGPU otherwise. (per-user file)
+#   1. Login profile  -> KWin renders on the NVIDIA dGPU by default. A confirmed
+#      restart-amd command selects AMD for one session. (per-user file)
 #   2. Live power rule -> udev pins the dGPU awake while that screen is plugged
 #      in, so it never sleeps out from under KWin. (system file, needs root)
 #
-# Usage: gpu-power-control {status|install|uninstall|on|auto|help}
+# Usage: gpu-power-control {status|install|uninstall|on|auto|notify|restart-amd|restart-nvidia|help}
 
 set -u
 
@@ -19,11 +19,17 @@ ENV_SRC="$COMP/10-nvidia-docked-primary.sh"
 HELPER_SRC="$COMP/nvidia-external-display-power.sh"
 RULE_SRC="$COMP/61-nvidia-external-display-power.rules"
 NOTIFY_SRC="$COMP/gpu-power-notify.sh"
+WARNING_SRC="$COMP/gpu-power-warning.sh"
+SWITCH_SRC="$COMP/gpu-session-switch.sh"
 
 ENV_DST="$HOME/.config/plasma-workspace/env/10-nvidia-docked-primary.sh"
 HELPER_DST="/usr/local/bin/nvidia-external-display-power.sh"
 RULE_DST="/etc/udev/rules.d/61-nvidia-external-display-power.rules"
 AUTOSTART_DST="$HOME/.config/autostart/gpu-power-notify.desktop"
+USER_DATA_DST="${XDG_DATA_HOME:-$HOME/.local/share}/gpu-power-control"
+USER_UNITS_DST="$HOME/.config/systemd/user"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/gpu-power-control"
+COMMAND_DST="$HOME/.local/bin/gpu-power-control"
 
 # ---------- styling ----------
 if [ -t 1 ]; then B=$'\033[1m'; G=$'\033[32m'; Y=$'\033[33m'; R=$'\033[31m'; D=$'\033[2m'; Z=$'\033[0m'
@@ -130,8 +136,23 @@ cmd_status() {
             warn "KWIN_DRM_DEVICES=$val (NVIDIA not first)"
         fi
     else
-        warn "rendering on the default AMD iGPU (KWIN_DRM_DEVICES not set) -- log in while docked to enable"
+        warn "rendering on the AMD iGPU (KWIN_DRM_DEVICES not set) -- use restart-nvidia to switch"
     fi
+
+    head "Session policy"
+    printf '  default renderer = NVIDIA\n'
+    if [ -s "$STATE_DIR/next-session-mode" ]; then
+        printf '  next session    = %s (one shot)\n' "$(cat "$STATE_DIR/next-session-mode")"
+    else
+        printf '  next session    = NVIDIA (default)\n'
+    fi
+    for timer in gpu-power-dock-watch.timer gpu-power-battery-warning.timer; do
+        if systemctl --user is-enabled --quiet "$timer" 2>/dev/null; then
+            ok "$timer enabled"
+        else
+            warn "$timer not enabled"
+        fi
+    done
 
     head "Installed components"
     insync() { [ -e "$2" ] && cmp -s "$1" "$2"; }
@@ -146,10 +167,20 @@ cmd_status() {
     else no "udev rule          (not installed)"; fi
     if [ -e "$AUTOSTART_DST" ]; then ok "login notification $AUTOSTART_DST"
     else no "login notification (not installed)"; fi
+    if [ -x "$USER_DATA_DST/gpu-power-warning.sh" ] && [ -x "$USER_DATA_DST/gpu-session-switch.sh" ]; then
+        ok "warning/switch helpers $USER_DATA_DST"
+    else no "warning/switch helpers (not installed)"; fi
+    if [ -L "$COMMAND_DST" ] && [ "$(readlink -f "$COMMAND_DST")" = "$REPO_DIR/gpu-power-control" ]; then
+        ok "command link         $COMMAND_DST"
+    else warn "command link not installed at $COMMAND_DST"; fi
     echo
 }
 
 cmd_install() {
+    head "Installing command"
+    mkdir -p "$(dirname "$COMMAND_DST")"
+    ln -sfn "$REPO_DIR/gpu-power-control" "$COMMAND_DST" && ok "$COMMAND_DST"
+
     head "Installing login profile (no root needed)"
     install -D -m0755 "$ENV_SRC" "$ENV_DST" && ok "$ENV_DST"
 
@@ -169,6 +200,17 @@ X-KDE-autostart-phase=2
 EOF
     ok "$AUTOSTART_DST"
 
+    head "Installing dock and battery warnings"
+    install -D -m0755 "$WARNING_SRC" "$USER_DATA_DST/gpu-power-warning.sh" && ok "$USER_DATA_DST/gpu-power-warning.sh"
+    install -D -m0755 "$SWITCH_SRC" "$USER_DATA_DST/gpu-session-switch.sh" && ok "$USER_DATA_DST/gpu-session-switch.sh"
+    for unit in gpu-power-dock-watch.service gpu-power-dock-watch.timer \
+                gpu-power-battery-warning.service gpu-power-battery-warning.timer; do
+        install -D -m0644 "$COMP/$unit" "$USER_UNITS_DST/$unit" && ok "$USER_UNITS_DST/$unit"
+    done
+    systemctl --user daemon-reload
+    systemctl --user enable --now gpu-power-dock-watch.timer gpu-power-battery-warning.timer \
+        && ok "dock watcher and battery reminder enabled"
+
     head "Installing live power rule (needs root)"
     sudo install -D -m0755 "$HELPER_SRC" "$HELPER_DST" && ok "$HELPER_DST"
     sudo install -D -m0644 "$RULE_SRC" "$RULE_DST"     && ok "$RULE_DST"
@@ -179,20 +221,37 @@ EOF
 
     head "Done"
     if nvidia_external_connected "$(detect_nvidia_pci)"; then
-        printf '  %sLog out and back in%s to render this session on the NVIDIA GPU.\n' "$B" "$Z"
+        printf '  %sRun %s restart-nvidia%s to move this session to the NVIDIA GPU.\n' "$B" "$(basename "$0")" "$Z"
     else
-        echo "  Plug in the external screen, then log out and back in to render on NVIDIA."
+        echo "  NVIDIA is now the default renderer for the next graphical login."
     fi
     echo "  A notification will show the active GPU at each login."
     echo "  Run '$(basename "$0") status' any time to check, or 'notify' to preview the popup."
 }
 
 cmd_uninstall() {
+    head "Removing command"
+    if [ -L "$COMMAND_DST" ] && [ "$(readlink -f "$COMMAND_DST")" = "$REPO_DIR/gpu-power-control" ]; then
+        rm -f "$COMMAND_DST" && ok "removed $COMMAND_DST"
+    else
+        warn "command link not present or points elsewhere"
+    fi
+
     head "Removing login profile"
     [ -e "$ENV_DST" ] && rm -f "$ENV_DST" && ok "removed $ENV_DST" || warn "not present"
 
     head "Removing login notification"
     [ -e "$AUTOSTART_DST" ] && rm -f "$AUTOSTART_DST" && ok "removed $AUTOSTART_DST" || warn "not present"
+
+    head "Removing dock and battery warnings"
+    systemctl --user disable --now gpu-power-dock-watch.timer gpu-power-battery-warning.timer 2>/dev/null || true
+    for unit in gpu-power-dock-watch.service gpu-power-dock-watch.timer \
+                gpu-power-battery-warning.service gpu-power-battery-warning.timer; do
+        [ -e "$USER_UNITS_DST/$unit" ] && rm -f "$USER_UNITS_DST/$unit"
+    done
+    rm -f "$USER_DATA_DST/gpu-power-warning.sh" "$USER_DATA_DST/gpu-session-switch.sh"
+    systemctl --user daemon-reload
+    ok "removed user warning units and helpers"
 
     head "Removing live power rule (needs root)"
     [ -e "$HELPER_DST" ] && sudo rm -f "$HELPER_DST" && ok "removed $HELPER_DST" || warn "helper not present"
@@ -206,7 +265,7 @@ cmd_uninstall() {
 
 cmd_help() {
     cat <<EOF
-${B}gpu-power-control${Z} -- NVIDIA dGPU docked profile for KWin Wayland
+${B}gpu-power-control${Z} -- primary-GPU and power policy for KWin Wayland
 
 ${B}Usage:${Z} $(basename "$0") <command>
 
@@ -217,6 +276,8 @@ ${B}Usage:${Z} $(basename "$0") <command>
   ${B}on${Z}         Force the NVIDIA dGPU powered on now (live override).
   ${B}auto${Z}       Let the NVIDIA dGPU runtime-suspend again (live override).
   ${B}notify${Z}     Pop the "which GPU am I using" notification now (test it).
+  ${B}restart-amd${Z}      Confirm, then log out and use AMD for the next session only.
+  ${B}restart-nvidia${Z}   Confirm, then log out and use NVIDIA (the default).
   ${B}help${Z}       Show this help.
 
 Files live in: $REPO_DIR
@@ -230,6 +291,8 @@ case "${1:-status}" in
     on)                write_pm on ;;
     auto|off)          write_pm auto ;;
     notify)            exec "$NOTIFY_SRC" ;;
+    restart-amd)       exec "$SWITCH_SRC" amd ;;
+    restart-nvidia)    exec "$SWITCH_SRC" nvidia ;;
     help|-h|--help)    cmd_help ;;
     *) echo "unknown command: $1" >&2; echo; cmd_help; exit 1 ;;
 esac

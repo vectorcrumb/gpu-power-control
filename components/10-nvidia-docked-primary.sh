@@ -1,13 +1,26 @@
 #!/bin/sh
-# Auto docked GPU profile for KWin (Wayland) -- installed by gpu-power-control.
+# Default NVIDIA GPU profile for KWin (Wayland) -- installed by gpu-power-control.
 #
-# If an external display wired to the NVIDIA dGPU is connected *at login*, make
-# KWin render the whole session on the NVIDIA card (avoids the slow reverse-PRIME
-# frame copy from the AMD iGPU). Otherwise leave the iGPU primary so the dGPU can
-# power down and save battery.
+# KWin normally renders on NVIDIA, whether docked or mobile.  The
+# `gpu-power-control restart-amd` command creates a one-shot marker that makes the
+# next graphical session use KDE's default AMD iGPU instead.  The marker is
+# consumed here, so subsequent sessions return to NVIDIA automatically.
 #
-# KWin reads KWIN_DRM_DEVICES once at startup, so switching docked<->mobile only
-# takes effect after a logout+login. This file is sourced by startplasma.
+# KWin reads KWIN_DRM_DEVICES once at startup, so changing renderer requires a
+# logout+login. This file is sourced by startplasma.
+
+state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/gpu-power-control"
+next_mode_file="$state_dir/next-session-mode"
+
+if [ -e "$next_mode_file" ]; then
+    next_mode=$(cat "$next_mode_file" 2>/dev/null)
+    rm -f "$next_mode_file"
+    if [ "$next_mode" = "amd" ]; then
+        unset KWIN_DRM_DEVICES
+        export GPU_POWER_CONTROL_MODE=amd
+        return 0 2>/dev/null || exit 0
+    fi
+fi
 
 # Find the NVIDIA dGPU's PCI address (driver binding is stable across power states).
 nv_pci=""
@@ -18,19 +31,7 @@ done
 if [ -n "$nv_pci" ]; then
     nv_dev="/dev/dri/by-path/pci-${nv_pci}-card"
 
-    # Is any output on the NVIDIA card connected right now?
-    external_connected=0
-    for status in /sys/class/drm/*/status; do
-        [ -e "$status" ] || continue
-        dev=$(readlink -f "$(dirname "$status")/device" 2>/dev/null)
-        case "$dev" in
-            *"$nv_pci"*)
-                [ "$(cat "$status" 2>/dev/null)" = "connected" ] && external_connected=1
-                ;;
-        esac
-    done
-
-    if [ "$external_connected" = "1" ] && [ -e "$nv_dev" ]; then
+    if [ -e "$nv_dev" ]; then
         # KWIN_DRM_DEVICES is ':'-separated, but the /dev/dri/by-path names embed
         # ':' in the PCI address (pci-0000:01:00.0-card), so KWin would split each
         # path into garbage fragments and find no GPU ("No suitable DRM devices").
@@ -45,5 +46,6 @@ if [ -n "$nv_pci" ]; then
             [ "$real" = "$nv_card" ] || devs="$devs:$real"
         done
         export KWIN_DRM_DEVICES="$devs"
+        export GPU_POWER_CONTROL_MODE=nvidia
     fi
 fi

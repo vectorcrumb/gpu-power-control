@@ -1,0 +1,11 @@
+[Unit]
+Description=Remind every 30 minutes about NVIDIA battery use
+
+[Timer]
+OnStartupSec=1min
+OnUnitInactiveSec=1min
+AccuracySec=15s
+Unit=gpu-power-battery-warning.service
+
+[Install]
+WantedBy=timers.target

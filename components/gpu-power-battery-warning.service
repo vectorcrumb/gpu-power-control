@@ -1,0 +1,6 @@
+[Unit]
+Description=Warn when NVIDIA is the primary GPU while on battery
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/share/gpu-power-control/gpu-power-warning.sh battery

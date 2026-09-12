@@ -1,0 +1,11 @@
+[Unit]
+Description=Check for a newly connected NVIDIA-wired display
+
+[Timer]
+OnStartupSec=10s
+OnUnitInactiveSec=10s
+AccuracySec=1s
+Unit=gpu-power-dock-watch.service
+
+[Install]
+WantedBy=timers.target
